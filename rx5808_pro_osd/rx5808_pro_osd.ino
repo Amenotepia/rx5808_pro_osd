@@ -77,6 +77,14 @@ along with this program. If not, see <http://www.gnu.org/licenses/>
 /* *************************************************/
 /* ***************** DEFINITIONS *******************/
 
+// The following values are to be tuned for Gteng T909 FPV Watch for accurate voltage monitor, they'll vary from the specific Step-Up Voltage Regulator and wires used
+#define OSD_VIN 4.94    // The actual voltage supplied to the Micro MinimOSD, should be around 5V
+#define VSAG 0.15       // Voltage difference between the lipo while power off and the voltage measures at Micro MinimOSD CURR pad
+                        //    Voltage measured at the lipo terminal while the watch is power off
+                        //    - voltage measured at Micro MinimOSD CURR pad while watch is power on
+
+//#define MYLOG      // Uncomment to add debug log
+
 //OSD Hardware 
 //#define ArduCAM328
 #define MinimOSD
@@ -85,24 +93,23 @@ along with this program. If not, see <http://www.gnu.org/licenses/>
 #define TELEMETRY_SPEED  38400  // Serial speed for key map update
 
 // switches
-#define KEY_A 0 // RX
-#define KEY_B 1 // TX
+#define KEY_A A2 // Pin BAT1 on Micro MinimOSD (Analog Pin)   FPV Watch Channel button (MODE Button)  
+#define KEY_B A0 // Pin BAT2 on Micro MinimOSD (Analog Pin)   FPV Watch Power button (UP Button)
 #define KEY_UP 2
 #define KEY_DOWN 1
 #define KEY_MID 3
 #define KEY_NONE 0
 
-#define rssiPin A1   // Depands on patch of minimOSD
-#define rx5808_SEL 5 // Depands on patch of minimOSD
+#define rssiPin A3   // Pin RSSI on Micro MinimOSD
+#define rx5808_SEL 3 // Pin D3 (PD3) on Micro MinimOSD -> RX5808 CH2 (SEL)
 
-//#define POWER_SENSE A0 // difficult to solder
-#define POWER_SENSE A2 // easier to solder
-#define POWER_SCALE 15.5 // divider 1.5K 22K, tweak to match correct voltage
+#define POWER_SENSE A1 // Pin CURR on Micro MinimOSD  FPV Watch Battery Positive
+#define POWER_SCALE 1 // No voltage divider, directly connect to 1S Lipo
 #define POWER_UPDATE_RATE 20 // how ofter power is updated (loops)
 
-#define spiDataPin 11
-#define slaveSelectPin 5
-#define spiClockPin 13
+#define spiDataPin 11  // Pin MOSI on Micro MinimOSD -> RX5808 CH1 (SDI)
+#define slaveSelectPin 3  // Should be same as rx5808_SEL above -> RX5808 CH2 (SEL)
+#define spiClockPin 13  // Pin SCK on Micro MinimOSD -> RX5808 CH3 (SCK)
 
 // key debounce delay in ms
 // NOTE: good values are in the range of 100-200ms
@@ -113,7 +120,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>
 //#define TV_FORMAT NTSC
 #define TV_FORMAT PAL
 
-#define led 13
 // RSSI default raw range
 #define RSSI_MIN_VAL 90
 #define RSSI_MAX_VAL 300
@@ -152,11 +158,12 @@ along with this program. If not, see <http://www.gnu.org/licenses/>
 #define EEPROM_ADR_RSSI_MAX_H 5
 #define EEPROM_ADR_VIDEO_MODE 6
 #define EEPROM_ADR_MANUAL_MODE 7
-#define EEPROM_ADR_MAGIC_KEY 8
+#define EEPROM_ADR_VOLT_DSP 8
+#define EEPROM_ADR_MAGIC_KEY 9
 #define EEPROM_MAGIC_KEY_SIZE 17
 const uint8_t MagicKey[] PROGMEM = { // key to check if EEprom matches software
   'R','X','5','8','0','8','O','S','D',
-  'R','E','V','1','.','1','.','2'
+  'R','E','V','1','.','1','.','3'
 };
 
 
@@ -203,7 +210,7 @@ const uint8_t MagicKey[] PROGMEM = { // key to check if EEprom matches software
 #define OSD_H_OFFSET 40 // adjust to your screen (0...63, 31 = center)
 #define OSD_V_OFFSET 25 // adjust to your screen (0...31, 15 = center)
 
-
+#define NUM_READINGS 10
 
 
 // Objects and Serial definitions
@@ -246,6 +253,7 @@ const uint8_t bandNumber[] PROGMEM = { // faster than calculate
   4,4,4,4,4,4,4,4,
 };
 // Symbol for each channel
+/*
 const uint8_t channelSymbol[] PROGMEM = {
     0xA0,0xA1,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7, // Band A
     0xA8,0xA9,0xAA,0xAB,0xAC,0xAD,0xAE,0xAF, // Band B
@@ -253,6 +261,7 @@ const uint8_t channelSymbol[] PROGMEM = {
     0xB8,0xB9,0xBA,0xBB,0xBC,0xBD,0xBE,0xBF, // Band F
     0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7  // Band RACE    
 };
+*/
 
 // All Channels of the above List ordered by Mhz
 //  dynamic arry that keeps the channel ID sorted by frequence for seqeunce scan
@@ -305,9 +314,15 @@ uint8_t power_update_delay=POWER_UPDATE_RATE;
 uint8_t channel_scan=0;
 uint8_t rssi_seek_threshold=RSSI_SEEK_TRESHOLD;
 uint8_t seek_up=0; // keep direction of seek
+uint8_t mon_voltage=0;
+uint8_t keyc;
+uint8_t readIdx=0;
+uint8_t video_yoffset;
 
 uint8_t debug=0;
 
+uint16_t vol_readings[NUM_READINGS];
+uint16_t vol_total=0;
 /*
  Array to keep values for spectrum print.
  A special coding is used, since one character has two colums.
@@ -340,7 +355,9 @@ uint8_t spectrum_channel_value[CHANNEL_MAX+2]={0};
 /**********************************************/
 void setup() 
 {
-
+#ifdef MYLOG
+    Serial.begin(57600);
+#endif
 //uploadFont();
 //while(1);
     // fill clonebar lookup with data
@@ -364,7 +381,10 @@ void setup()
     clone_bar_to_left[26]=1;
     clone_bar_to_lower[26]=1;
  
-
+    // clear voltage sensor array
+    for (int i=0; i<NUM_READINGS; i++)
+        vol_readings[i] = 0;
+        
     // create channelList lookup sorted by freqency
     // 1. fill array
     for(int i=0; i<=CHANNEL_MAX_INDEX; i++) 
@@ -411,6 +431,7 @@ void setup()
         EEPROM.write(EEPROM_ADR_RSSI_MAX_H,highByte(RSSI_MAX_VAL));
         EEPROM.write(EEPROM_ADR_VIDEO_MODE,video_mode);
         EEPROM.write(EEPROM_ADR_MANUAL_MODE,manual_mode);
+        EEPROM.write(EEPROM_ADR_VOLT_DSP,mon_voltage);
         // store magic key for next check
         for(int i=0; i<EEPROM_MAGIC_KEY_SIZE; i++)
         {
@@ -432,7 +453,12 @@ void setup()
     // rssi_max=300; //  expect no clipping (typical ~250)
     
     video_mode=EEPROM.read(EEPROM_ADR_VIDEO_MODE);
+    if (video_mode == PAL)
+        video_yoffset = 0;
+    else
+        video_yoffset = 1;
     manual_mode=EEPROM.read(EEPROM_ADR_MANUAL_MODE);      
+    mon_voltage=EEPROM.read(EEPROM_ADR_VOLT_DSP);  
     force_menu_redraw=1;
  
     unplugSlaves();
@@ -476,29 +502,58 @@ void setup()
 
 void loop() 
 {
-
     /************************/
     /*  Menu hide handler   */
     /************************/
     if(menu_hide_timer==0 || menu_hide==1)
     {
-        // turn OSD off
-        osd.control(OSD_OFF);
-        while(get_key() == KEY_NONE)
+        if (mon_voltage) {
+          osd.clear();
+          osd.control(osd_mode);
+          //show_power(23, 2, 0);
+        } else {
+          // turn OSD off
+          osd.control(OSD_OFF);
+        }
+        while((keyc = get_key()) == KEY_NONE)
         {
             // wait for wakeup
             delay(100);
+            if (mon_voltage) {
+                // update Power display
+                //if(!power_update_delay--)
+                {
+                    power_update_delay=POWER_UPDATE_RATE;
+                    show_power(23,2,0);
+                }
+            }
         }
-        // wakeup!
-        menu_hide_timer=MENU_HIDE_TIMER;
-        menu_hide=0;        
-        osd.control(osd_mode); // we are back
-        while(get_key() != KEY_NONE)
-        {
-            // wait for key release as debounce
-            // to avoid change by pressed key
-        }        
-        menu_hide=0;
+        
+        if (keyc == KEY_MID) {
+            // wakeup!
+            menu_hide_timer=MENU_HIDE_TIMER;
+            menu_hide=0;
+            force_menu_redraw=1;        
+            osd.control(osd_mode); // we are back
+            while(get_key() != KEY_NONE)
+            {
+                // wait for key release as debounce
+                // to avoid change by pressed key
+            }        
+            menu_hide=0;
+        } else if (keyc == KEY_UP) {
+            if (mon_voltage)
+                mon_voltage = 0;
+            else
+                mon_voltage = 1;
+            while(get_key() != KEY_NONE)
+            {
+                // wait for key release as debounce
+                // to avoid change by pressed key
+            }
+            menu_hide_timer = 0;
+            return;
+        }
     }
     else
     {
@@ -639,7 +694,7 @@ void loop()
                     channelIndex = channelList[channel_scan];                    
                 }
             }
-            if( get_key() == KEY_DOWN) // channel DOWN
+            if( get_key() == KEY_MID) // channel DOWN
             {
                 if (manual_mode== MODE_BAND)
                 {            
@@ -795,7 +850,8 @@ void loop()
         }
         spectrum_dump(6);  
         // analyse spectrum an mark potential channels
-        dump_channels(BAND_SCANNER_SPECTRUM_Y_MIN-8);
+        //dump_channels(BAND_SCANNER_SPECTRUM_Y_MIN-8);
+        dump_channels(SCREEN_Y_MAX);
         
         if(state == STATE_RSSI_SETUP) {
             if(!rssi_setup_run--)    
@@ -909,7 +965,7 @@ void loop()
                         state_last_used=state;                         
                         spectrum_init();     
                     break;
-                    case 3: // MANUEL MODE
+                    case 3: // MANUAL MODE
                         state=STATE_MANUAL;   
                         state_last_used=state; 
                         spectrum_init();
@@ -974,6 +1030,7 @@ void loop()
                         EEPROM.write(EEPROM_ADR_STATE,state_last_used);
                         EEPROM.write(EEPROM_ADR_TUNE,channelIndex);  
                         EEPROM.write(EEPROM_ADR_VIDEO_MODE,video_mode);                        
+                        EEPROM.write(EEPROM_ADR_VOLT_DSP,mon_voltage);
                         osd_print (MENU_SETUP_X, (MENU_SETUP_Y + 4 + MENU_SETUP_ENTRY ), " Settings saved..");
                         delay(1000);
                         osd_print (MENU_SETUP_X, (MENU_SETUP_Y + 4 + MENU_SETUP_ENTRY ), "                 ");
@@ -1043,7 +1100,7 @@ void loop()
     if(!power_update_delay--)
     {
         power_update_delay=POWER_UPDATE_RATE;
-        show_power(23,2);
+        show_power(23,2,1);
     } 
 }
 
@@ -1357,14 +1414,30 @@ void wait_rssi_ready()
     }
 }
       
-void show_power(uint8_t x, uint8_t y)
+void show_power(uint8_t x, uint8_t y, uint8_t logo)
 {
-    uint16_t sensorValue = analogRead(POWER_SENSE);
-  // Convert the analog reading (which goes from 0 - 1023) to a voltage (0 - 5V):    
-    double voltage = sensorValue * (5 / 1023.0) * POWER_SCALE;
-    osd.setPanel(x-1,y-1);  
+    uint16_t vol_avg = analogRead(POWER_SENSE);
+/*
+    uint16_t vol_avg;
+    
+    vol_total = vol_total - vol_readings[readIdx];
+    vol_readings[readIdx] = analogRead(POWER_SENSE);
+    vol_total = vol_total + vol_readings[readIdx];
+    readIdx++;
+    if (readIdx >= NUM_READINGS)
+        readIdx = 0;
+    vol_avg = vol_total / NUM_READINGS;
+*/
+  // Convert the analog reading (which goes from 0 - 1023) to a voltage (0 - 5V):
+    // GTeng voltage sag 0.15V, 3V to 5V regulator stablized at 4.94V  
+    double voltage = vol_avg * (OSD_VIN / 1023.0) * POWER_SCALE + VSAG;
+#ifdef MYLOG
+    Serial.print("Voltage: ");
+    Serial.println(voltage);
+#endif
+    osd.setPanel(x-1,y-1-video_yoffset);  
     osd.openPanel();
-    osd.printf("%c%2.1f",0xd0,voltage); 
+    osd.printf("%c%2.2f", logo ? 0xd0:' ',voltage); 
     osd.closePanel();
 }
 
@@ -1413,6 +1486,7 @@ uint16_t readRSSI()
    
 void osd_print (uint8_t x, uint8_t y, const char string[30])
 {
+    y -= video_yoffset;
     osd.setPanel(x-1,y-1);  
     osd.openPanel();
     osd.printf("%s",string); 
@@ -1421,6 +1495,7 @@ void osd_print (uint8_t x, uint8_t y, const char string[30])
 // special print using PROGMEM strings
 void osd_print_P (uint8_t x, uint8_t y, const prog_char text[])
 {
+    y -= video_yoffset;
     char P_print_buffer[30];
     strcpy_P(P_print_buffer,text); // copy PROGMEM string to local buffer
     osd.setPanel(x-1,y-1);  
@@ -1430,6 +1505,7 @@ void osd_print_P (uint8_t x, uint8_t y, const prog_char text[])
 }
 void osd_print_int (uint8_t x, uint8_t y, uint16_t value)
 {
+    y -= video_yoffset;
     osd.setPanel(x-1,y-1);  
     osd.openPanel();
     osd.printf("%d",value); 
@@ -1438,11 +1514,13 @@ void osd_print_int (uint8_t x, uint8_t y, uint16_t value)
 
 void osd_print_char (uint8_t x, uint8_t y, const char value)
 {
+    y -= video_yoffset;
     osd.setPanel(x-1,y-1);  
     osd.openPanel();
     osd.printf("%c",value); 
     osd.closePanel(); 
 }
+/*
 void osd_print_debug (uint8_t x, uint8_t y, const char string[30], uint16_t value)
 {
     osd.setPanel(x-1,y-1);  
@@ -1457,6 +1535,7 @@ void osd_print_debug_x (uint8_t x, uint8_t y, const char string[30], uint16_t va
     osd.printf("%s :0x%x   ",string,value); 
     osd.closePanel(); 
 }
+*/
 
 
 /*******************/
@@ -1785,7 +1864,9 @@ void dump_channels(uint8_t y_pos)
     uint8_t channel_index=0;
 //    char marker_string[]="                           "; // clear line
 //    char marker_string[]="aaaaaaaaaabbbbbbbbbbccccccc"; // clear line
-    char marker_string[]="                           "; // clear line    
+    //char marker_string[]="                           "; // clear line    
+    char marker_string1[]="                           "; // clear line    
+    char marker_string2[]="                           "; // clear line
     #if 1
     // Note we must run 40 + 1 to print right side (detect max)
     for (channel_scan=CHANNEL_MIN_INDEX; channel_scan <= CHANNEL_MAX_INDEX+1;channel_scan++ )
@@ -1812,14 +1893,21 @@ void dump_channels(uint8_t y_pos)
             uint8_t x=((x_pos_54)/2); // final down scale to single character
             // add right marker at last position
             
-            marker_string[x]=pgm_read_byte_near(channelSymbol + channelList[channel_scan-1]);
+            //marker_string[x]=pgm_read_byte_near(channelSymbol + channelList[channel_scan-1]);
+            marker_string1[x] = pgm_read_byte_near(bandNames + channelList[channel_scan-1]);
+            uint8_t ch_num = (channelList[channel_scan-1]+1) % 8;
+            if (ch_num == 0)
+                ch_num = 8;
+            marker_string2[x] = '0' + ch_num;
             last_value=0;
             //marker_string[10]=0xA0;
         }
     }
     #endif
     // print marler line
-    osd_print (BAND_SCANNER_SPECTRUM_X_MIN, y_pos,marker_string );
+    //osd_print (BAND_SCANNER_SPECTRUM_X_MIN, y_pos,marker_string );
+    osd_print (BAND_SCANNER_SPECTRUM_X_MIN, y_pos,marker_string1 );
+    osd_print (BAND_SCANNER_SPECTRUM_X_MIN, y_pos+1,marker_string2 );
     
 }
 
@@ -1859,7 +1947,8 @@ void screen_manual_data(uint8_t channelIndex)
     // add marker for all channel per active band
     // set available channels marker
     // clear symbol line
-    osd_print(BAND_SCANNER_SPECTRUM_X_MIN,SCREEN_Y_MAX,"                              ");
+    for (uint8_t i=0; i< 3; i++)
+        osd_print(BAND_SCANNER_SPECTRUM_X_MIN,SCREEN_Y_MAX+i,"                              ");
     uint8_t loop=0;
     for(loop=0;loop<8;loop++)
     {
@@ -1872,7 +1961,12 @@ void screen_manual_data(uint8_t channelIndex)
         uint8_t x_pos_54= (frequency_delta*(INTEGER_GAIN+ROUND_CORRECTION)) / frequency_per_char;
         uint8_t x=((x_pos_54)/2); // final down scale to single character
         // print marker
-        osd_print_char(BAND_SCANNER_SPECTRUM_X_MIN+x,SCREEN_Y_MAX,pgm_read_byte_near(channelSymbol + channel));
+        //osd_print_char(BAND_SCANNER_SPECTRUM_X_MIN+x,SCREEN_Y_MAX,pgm_read_byte_near(channelSymbol + channel));
+        osd_print_char(BAND_SCANNER_SPECTRUM_X_MIN+x,SCREEN_Y_MAX,pgm_read_byte_near(bandNames + channel));
+        uint8_t ch_num = (channel+1) % 8;
+        if (ch_num == 0)
+            ch_num = 8;
+        osd_print_char(BAND_SCANNER_SPECTRUM_X_MIN+x,SCREEN_Y_MAX+1, '0' + ch_num);
     }
 }
 
@@ -1888,9 +1982,9 @@ void screen_startup(void)
     const static char P_text_1[] PROGMEM  ="\x03\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x04";
     const static char P_text_2[] PROGMEM  ="\x02 RX5808 PRO OSD \x02";
     const static char P_text_3[] PROGMEM  ="\x07\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x08";
-    const static char P_text_4[] PROGMEM  ="\x02   22.11.2015   \x02";
-    const static char P_text_5[] PROGMEM  ="\x02    V1.1.3      \x02";
-    const static char P_text_6[] PROGMEM  ="\x02  MARKO HOEPKEN \x02";
+    const static char P_text_4[] PROGMEM  ="\x02   15/12/2017   \x02";
+    const static char P_text_5[] PROGMEM  ="\x02     V1.1.3     \x02";
+    const static char P_text_6[] PROGMEM  ="\x02   GTENG T909   \x02";
     const static char P_text_7[] PROGMEM  ="\x05\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x06";
 
     uint8_t y=MENU_MODE_SELECTION_Y;
@@ -1919,7 +2013,7 @@ void screen_mode_selection(void)
     const static char P_text_4[] PROGMEM  = "\x02  EXIT          \x02";
     const static char P_text_5[] PROGMEM  = "\x02  AUTO SEARCH   \x02";
     const static char P_text_6[] PROGMEM  = "\x02  BAND SCANNER  \x02";
-    const static char P_text_7[] PROGMEM  = "\x02  MANUEL MODE   \x02";
+    const static char P_text_7[] PROGMEM  = "\x02  MANUAL MODE   \x02";
     const static char P_text_8[] PROGMEM  = "\x02  SETUP         \x02";
     const static char P_text_9[] PROGMEM  = "\x05\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x06";
 
@@ -2012,7 +2106,7 @@ void screen_band_scanner(uint8_t mode)
     spectrum_dump(6); 
     // add test to show that background scan runs
     osd_print(10,7,"Scanning.."); 
-    show_power(23,2);
+    show_power(23,2,1);
 }
 
 // Manual settings screen
@@ -2049,7 +2143,7 @@ void screen_manual(uint8_t mode, uint8_t channelIndex)
     {    
         osd_print_P(BAND_SCANNER_SPECTRUM_X_MIN,2,P_text_4);       
     }    
-    show_power(23,2); 
+    show_power(23,2,1); 
     osd_print_P(BAND_SCANNER_SPECTRUM_X_MIN,3,P_text_5);           
     // CHAN comes from update function
     //    osd_print(BAND_SCANNER_SPECTRUM_X_MIN,4,"\x02 CHAN: ?  \x10 \x11 \x12 \x13 \x14 \x15 \x16 \x17\x02");
@@ -2118,62 +2212,29 @@ uint8_t get_key (void)
     {
         menu_hide_timer=MENU_HIDE_TIMER;
     }
-    
     return(current_key);
 }
 
 // no debounce get key function
 uint8_t get_key_raw (void)
 {   
-    uint8_t sw_dir_a2b = 0;
-    uint8_t sw_dir_b2a = 0;    
-    // try both directions
-    // KEY_A -> KEY_B
-    pinMode(KEY_A, OUTPUT);
-    pinMode(KEY_B, INPUT);
-    digitalWrite(KEY_B, INPUT_PULLUP);
-    digitalWrite(KEY_A, LOW);
-    // check if the LOW will get to port
-    if(digitalRead(KEY_B) == 0)
-    {
-        sw_dir_a2b=1;
-    }
-    // KEY_B -> KEY_A
-    pinMode(KEY_B, OUTPUT);
-    pinMode(KEY_A, INPUT);
-    digitalWrite(KEY_A, INPUT_PULLUP);
-    digitalWrite(KEY_B, LOW);
-    // check if the LOW will get to port
-    if(digitalRead(KEY_A) == 0)
-    {
-        sw_dir_b2a=1;
-    }    
-    // turn off key driver
-    pinMode(KEY_A, INPUT);
-    digitalWrite(KEY_A, INPUT_PULLUP);    
-    pinMode(KEY_B, INPUT);
-    digitalWrite(KEY_B, INPUT_PULLUP);
-    // check results
-    // 0 = no key
-    // 1 = Key 1
-    // 2 = Key 2
-    // 3 = both keys, or bypass key
-    if(sw_dir_a2b && sw_dir_b2a)
-    {
-        return (3);
-    }
-    else if (sw_dir_a2b)
-    {
-        return (1);
-    }
-    else if (sw_dir_b2a)
-    {
-        return (2);
-    }
+    // When the Power button is pressed, voltage will jump from 0V to around 2.29V
+#ifdef MYLOG
+    Serial.print("Key: ");
+    Serial.print(analogRead(KEY_A) * (5.0 / 1023.0));
+    Serial.print(" ");
+    Serial.println(analogRead(KEY_B) * (5.0 / 1023.0));
+#endif //MYLOG
+    // When the Channel button is pressed, voltage will jump from 3.3V to 0V
+    if ((analogRead(KEY_A) * (5.0 / 1023.0)) < 1.0)
+    //if ((analogRead(KEY_A) * (5.0 / 1023.0)) < 0.5)
+        return(2);
+    // When the Power button is pressed, voltage will jump from 0V to 1.7V
+    else if ((analogRead(KEY_B) * (5.0 / 1023.0)) > 0.8)
+    //else if ((analogRead(KEY_B) * (5.0 / 1023.0)) < 0.5)
+        return(3);
     else
-    {
-        return (0);
-    }    
+        return(0);
 }
 
 void unplugSlaves(){
